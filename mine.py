@@ -1,94 +1,57 @@
 import os
 import logging
 import google.generativeai as genai
+from dotenv import load_dotenv  # Библиотека для работы с .env
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-# --- НАСТРОЙКИ ---
-# Вставь свои ключи сюда
-TELEGRAM_TOKEN = "ТВОЙ_ТЕЛЕГРАМ_ТОКЕН"
-GEMINI_API_KEY = "ТВОЙ_GEMINI_API_KEY"
+# 1. ЗАГРУЗКА НАСТРОЕК
+load_dotenv() # Читаем файл .env
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
+# Настройка нейросети
 genai.configure(api_key=GEMINI_API_KEY)
-# Используем Flash-модель: она быстрая и хорошо "видит" детали на фото [cite: 123, 128]
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-# Заглушка: данные художника (как будто он их уже ввел) 
-MOCK_ARTIST_CONTEXT = {
+# Контекст (наша заглушка Айвазовского)
+MOCK_ARTIST = {
     "medium": "Масло, холст",
     "style": "Романтизм, маринистика",
-    "art_statement": "Я Иван Айвазовский. Моя жизнь — это море. Я стремлюсь запечатлеть бесконечную игру света на волнах, мощь стихии и поэзию морского горизонта[cite: 140, 145]."
+    "art_statement": "Я Иван Айвазовский. Моя жизнь — это море. Я стремлюсь запечатлеть бесконечную игру света на волнах."
 }
 
 # --- ПРОМПТЫ ---
-# Шаг 1: Только факты и визуальный анализ [cite: 109, 110]
-ANALYSIS_PROMPT = """
-Ты — экспертный арт-консультант. Проведи глубокий визуальный анализ картины:
-1. Сюжет и композиция: что в центре, какой ритм[cite: 110].
-2. Цвет и свет: ключевые палитры и освещение[cite: 111].
-3. Техника: учитывая медиум ({medium}) и стиль ({style}), опиши характер мазков[cite: 111].
-4. Метафора: какую главную эмоцию передает работа[cite: 112].
-
-Пиши профессионально, 5-6 предложений, без критики[cite: 113].
-"""
-
-# Шаг 2: Креатив на основе анализа и контекста художника [cite: 113, 115]
-CREATIVE_PROMPT = """
-Ты — креативный копирайтер. На основе анализа картины создай контент для соцсетей.
-Контекст художника: {art_statement} [cite: 120]
-
-ЗАДАЧА 1: Названия. Предложи 5 вариантов (Минимализм, Метафора, Атмосферное, Повествовательное, Абстрактное)[cite: 115, 116, 117].
-ЗАДАЧА 2: Описания. Сгенерируй 3 варианта поста:
-1. Поэтичный (чувства и смыслы)[cite: 118].
-2. Экспертный (техника и свет)[cite: 119].
-3. Story-style (интрига и вопрос к подписчикам)[cite: 120].
-"""
+ANALYSIS_PROMPT = "Ты экспертный арт-консультант. Опиши сюжет, цвета и атмосферу картины на фото. Будь краток (5 предложений)."
+CREATIVE_PROMPT = "На основе анализа: {analysis}. Контекст художника: {statement}. Предложи 5 названий картины и 3 варианта поста для соцсетей."
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🎨 Изучаю вашу картину, секунду...")
-
-    # 1. Скачиваем фото во временный файл
+    await update.message.reply_text("🎨 Секунду, смотрю на картину...")
+    
+    # Сохраняем фото
     photo_file = await update.message.photo[-1].get_file()
     photo_path = "temp_art.jpg"
     await photo_file.download_to_drive(photo_path)
 
     try:
-        # --- ЭТАП 1: ВИЗУАЛЬНЫЙ АНАЛИЗ ---
+        # Этап 1: Анализ фото
         with open(photo_path, "rb") as f:
-            image_data = f.read()
+            img_data = f.read()
         
-        image_parts = [{"mime_type": "image/jpeg", "data": image_data}]
+        response_visual = model.generate_content([ANALYSIS_PROMPT, {"mime_type": "image/jpeg", "data": img_data}])
         
-        # Низкая температура для точности анализа (0.4) 
-        analysis_resp = model.generate_content(
-            [ANALYSIS_PROMPT.format(medium=MOCK_ARTIST_CONTEXT['medium'], style=MOCK_ARTIST_CONTEXT['style']), image_parts[0]],
-            generation_config={"temperature": 0.4}
-        )
-        visual_analysis = analysis_resp.text
+        # Этап 2: Текст
+        final_prompt = CREATIVE_PROMPT.format(analysis=response_visual.text, statement=MOCK_ARTIST["art_statement"])
+        response_text = model.generate_content(final_prompt)
 
-        # --- ЭТАП 2: ГЕНЕРАЦИЯ КОНТЕНТА ---
-        # Высокая температура для креативности названий (0.9) [cite: 121, 147]
-        creative_query = CREATIVE_PROMPT.format(art_statement=MOCK_ARTIST_CONTEXT['art_statement']) + f"\n\nАнализ картины: {visual_analysis}"
-        
-        creative_resp = model.generate_content(
-            creative_query,
-            generation_config={"temperature": 0.9}
-        )
-
-        # 4. Отправляем результат пользователю
-        final_text = f"✨ **Варианты для вашей картины:**\n\n{creative_resp.text}"
-        await update.message.reply_text(final_text, parse_mode='Markdown')
-
+        await update.message.reply_text(response_text.text)
     except Exception as e:
-        logging.error(f"Ошибка: {e}")
-        await update.message.reply_text("Произошла ошибка при анализе. Попробуйте еще раз.")
+        await update.message.reply_text(f"Ошибка: {e}")
     finally:
-        if os.path.exists(photo_path):
-            os.remove(photo_path)
+        if os.path.exists(photo_path): os.remove(photo_path)
 
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    
-    print("Бот запущен и ждет картины...")
+    print("Бот запущен! Иди в Телеграм и отправляй фото.")
     app.run_polling()
